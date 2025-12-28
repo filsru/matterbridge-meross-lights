@@ -2,29 +2,45 @@
   "title": "Matterbridge Meross Lights",
   "type": "object",
   "properties": {
-    "name": {
-      "type": "string",
-      "title": "Name",
-      "description": "Nom displayed in Matter",
-      "default": "Meross Light"
-    },
-    "ip": {
-      "type": "string",
-      "title": "IP",
-      "description": "IP of device (ex: 192.168.1.109)"
-    },
-    "key": {
-      "type": "string",
-      "title": "Device key",
-      "description": "Meross Key"
-    },
-    "channel": {
-      "type": "integer",
-      "title": "Channel",
-      "description": "Channel Meross",
-      "default": 0,
-      "minimum": 0
+    "devices": {
+      "type": "array",
+      "title": "Devices",
+      "description": "List of Meross lights to expose",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "Unique id for storage (must be unique per device). Example: meross-light-bedroom"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Name displayed in Matter"
+          },
+          "ip": {
+            "type": "string",
+            "title": "IP",
+            "description": "IP of device (ex: 192.168.1.109)"
+          },
+          "key": {
+            "type": "string",
+            "title": "Device key",
+            "description": "Meross Key"
+          },
+          "channel": {
+            "type": "integer",
+            "title": "Channel",
+            "default": 0,
+            "minimum": 0
+          }
+        },
+        "required": ["id", "name", "ip", "key"],
+        "additionalProperties": false
+      }
     }
   },
-  "required": ["ip", "key"]
+  "required": ["devices"]
 }

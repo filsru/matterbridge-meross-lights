@@ -1,42 +1,24 @@
-/**
- * This file contains the plugin template.
- *
- * @file module.ts
- * @author Luca Liguori
- * @created 2025-06-15
- * @version 1.3.0
- * @license Apache-2.0
- *
- * Copyright 2025, 2026, 2027 Luca Liguori.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 import {
   MatterbridgeDynamicPlatform,
   MatterbridgeEndpoint,
-  onOffOutlet,
+  extendedColorLight,
   PlatformConfig,
   PlatformMatterbridge,
 } from 'matterbridge';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
-import { createHash, randomBytes } from 'node:crypto';
+
+import { merossToggleX, merossSetRgbAndBrightness, rgbToInt } from './merossHttp.js';
+
+type MerossDeviceConfig = {
+  id: string;
+  name: string;
+  ip: string;
+  key: string;
+  channel?: number;
+};
 
 type MerossPlatformConfig = PlatformConfig & {
-  ip?: string;
-  key?: string;
-  name?: string;
-  channel?: number;
+  devices: MerossDeviceConfig[];
 };
 
 export default function initializePlugin(
@@ -44,19 +26,45 @@ export default function initializePlugin(
   log: AnsiLogger,
   config: PlatformConfig,
 ): TemplatePlatform {
-  return new TemplatePlatform(matterbridge, log, config);
+  return new TemplatePlatform(matterbridge, log, config as MerossPlatformConfig);
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+// Hue/Sat (0..254) -> RGB int (0xRRGGBB)
+function hsvToRgbInt(hue254: number, sat254: number): number {
+  const h = (clamp(hue254, 0, 254) / 254) * 360;
+  const s = clamp(sat254, 0, 254) / 254;
+  const v = 1;
+
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+
+  let r1 = 0,
+    g1 = 0,
+    b1 = 0;
+  if (h < 60) [r1, g1, b1] = [c, x, 0];
+  else if (h < 120) [r1, g1, b1] = [x, c, 0];
+  else if (h < 180) [r1, g1, b1] = [0, c, x];
+  else if (h < 240) [r1, g1, b1] = [0, x, c];
+  else if (h < 300) [r1, g1, b1] = [x, 0, c];
+  else [r1, g1, b1] = [c, 0, x];
+
+  const r = Math.round((r1 + m) * 255);
+  const g = Math.round((g1 + m) * 255);
+  const b = Math.round((b1 + m) * 255);
+  return rgbToInt(r, g, b);
 }
 
 export class TemplatePlatform extends MatterbridgeDynamicPlatform {
-  private merossIp?: string;
-  private merossKey?: string;
-  private deviceName = 'Meross Light';
-  private channel = 0;
+  declare config: MerossPlatformConfig;
 
-  constructor(matterbridge: PlatformMatterbridge, log: AnsiLogger, config: PlatformConfig) {
+  constructor(matterbridge: PlatformMatterbridge, log: AnsiLogger, config: MerossPlatformConfig) {
     super(matterbridge, log, config);
 
-    // Verify that Matterbridge is the correct version
     if (
       this.verifyMatterbridgeVersion === undefined ||
       typeof this.verifyMatterbridgeVersion !== 'function' ||
@@ -67,18 +75,7 @@ export class TemplatePlatform extends MatterbridgeDynamicPlatform {
       );
     }
 
-    const cfg = this.config as MerossPlatformConfig;
-    this.merossIp = cfg.ip;
-    this.merossKey = cfg.key;
-    this.deviceName = cfg.name ?? 'Meross Light';
-    this.channel = typeof cfg.channel === 'number' ? cfg.channel : 0;
-
     this.log.info(`Initializing Platform...`);
-    if (!this.merossIp || !this.merossKey) {
-      this.log.warn('Meross not configured yet: please set ip and key in the plugin settings.');
-    } else {
-      this.log.info(`Meross configured for IP ${this.merossIp} (key hidden), channel ${this.channel}.`);
-    }
   }
 
   override async onStart(reason?: string) {
@@ -87,21 +84,12 @@ export class TemplatePlatform extends MatterbridgeDynamicPlatform {
     await this.ready;
     await this.clearSelect();
 
-    if (!this.merossIp || !this.merossKey) {
-      this.log.warn('Plugin not configured (ip/key missing). Skipping discovery.');
-      return;
-    }
-
     await this.discoverDevices();
   }
 
   override async onConfigure() {
     await super.onConfigure();
     this.log.info('onConfigure called');
-
-    for (const device of this.getDevices()) {
-      this.log.info(`Configuring device: ${device.uniqueId}`);
-    }
   }
 
   override async onChangeLoggerLevel(logLevel: LogLevel) {
@@ -110,82 +98,104 @@ export class TemplatePlatform extends MatterbridgeDynamicPlatform {
 
   override async onShutdown(reason?: string) {
     await super.onShutdown(reason);
-
     this.log.info(`onShutdown called with reason: ${reason ?? 'none'}`);
     if (this.config.unregisterOnShutdown === true) await this.unregisterAllDevices();
+  }
+
+  private validateDevices(): MerossDeviceConfig[] {
+    const devices = this.config.devices;
+
+    if (!Array.isArray(devices) || devices.length === 0) {
+      throw new Error('Config error: devices[] is required and must contain at least one device');
+    }
+
+    const seen = new Set<string>();
+    for (const d of devices) {
+      if (!d?.id || !d?.name || !d?.ip || !d?.key) {
+        throw new Error(`Config error: each device requires id, name, ip, key`);
+      }
+      if (seen.has(d.id)) {
+        throw new Error(`Config error: duplicate device id "${d.id}"`);
+      }
+      seen.add(d.id);
+    }
+    return devices;
   }
 
   private async discoverDevices() {
     this.log.info('Discovering devices...');
 
-    // Minimal: expose an outlet to test on/off commands.
-    // Next: swap onOffOutlet -> onOffLight + level/color clusters.
-    const outlet = new MatterbridgeEndpoint(onOffOutlet, { id: 'meross1' })
-      .createDefaultBridgedDeviceBasicInformationClusterServer(
-        this.deviceName,
-        'MEROSS-SN-LOCAL',
-        this.matterbridge.aggregatorVendorId,
-        'Matterbridge',
-        'Meross via Matterbridge',
-        10000,
-        '1.0.0',
-      )
-      .createDefaultPowerSourceWiredClusterServer()
-      .addRequiredClusterServers()
-      .addCommandHandler('on', async (data) => {
-        this.log.info(`Command on called on cluster ${data.cluster}`);
-        await this.merossToggle(true);
-      })
-      .addCommandHandler('off', async (data) => {
-        this.log.info(`Command off called on cluster ${data.cluster}`);
-        await this.merossToggle(false);
-      });
+    const devices = this.validateDevices();
 
-    await this.registerDevice(outlet);
-  }
+    for (const d of devices) {
+      const channel = Number(d.channel ?? 0);
 
-  private md5(input: string): string {
-    return createHash('md5').update(input, 'utf8').digest('hex');
-  }
+      // Cache PAR DEVICE (important pour envoyer rgb+luminance ensemble)
+      let lastRgb = 0xffffff;
+      let lastLum = 100;
 
-  private async merossToggle(on: boolean) {
-    if (!this.merossIp || !this.merossKey) {
-      this.log.warn('merossToggle called but ip/key are missing.');
-      return;
+      this.log.info(`Registering Meross light id=${d.id} name="${d.name}" ip=${d.ip} ch=${channel}`);
+
+      const light = new MatterbridgeEndpoint(extendedColorLight, { id: d.id })
+        .createDefaultBridgedDeviceBasicInformationClusterServer(
+          d.name,
+          `SN-${d.id}`,
+          this.matterbridge.aggregatorVendorId,
+          'Matterbridge',
+          d.name,
+          10000,
+          '1.0.0',
+        )
+        .createDefaultPowerSourceWiredClusterServer()
+        .addRequiredClusterServers()
+
+        // ON / OFF
+        .addCommandHandler('on', async () => {
+          this.log.info(`Meross ON -> ${d.ip} (${d.name}) ch=${channel}`);
+          await merossToggleX(d.ip, d.key, channel, true);
+        })
+        .addCommandHandler('off', async () => {
+          this.log.info(`Meross OFF -> ${d.ip} (${d.name}) ch=${channel}`);
+          await merossToggleX(d.ip, d.key, channel, false);
+        })
+
+        // Brightness (LevelControl)
+        .addCommandHandler('moveToLevel', async (data) => {
+          const raw = Number((data.request as any)?.level ?? (data.request as any)?.newLevel ?? NaN);
+          this.log.debug?.(`[${d.id}] moveToLevel request=${JSON.stringify(data.request)}`);
+          if (!Number.isFinite(raw)) return;
+
+          lastLum = Math.round((clamp(raw, 0, 254) / 254) * 100);
+          await merossSetRgbAndBrightness(d.ip, d.key, channel, lastRgb, lastLum);
+        })
+        .addCommandHandler('moveToLevelWithOnOff', async (data) => {
+          const raw = Number((data.request as any)?.level ?? (data.request as any)?.newLevel ?? NaN);
+          this.log.debug?.(`[${d.id}] moveToLevelWithOnOff request=${JSON.stringify(data.request)}`);
+          if (!Number.isFinite(raw)) return;
+
+          lastLum = Math.round((clamp(raw, 0, 254) / 254) * 100);
+
+          if (lastLum > 0) await merossToggleX(d.ip, d.key, channel, true);
+          await merossSetRgbAndBrightness(d.ip, d.key, channel, lastRgb, lastLum);
+        })
+
+        // Couleur (Hue/Sat) - ColorControl
+        .addCommandHandler('moveToHueAndSaturation', async (data) => {
+          const hue = Number((data.request as any)?.hue ?? NaN);
+          const sat = Number((data.request as any)?.saturation ?? NaN);
+          this.log.debug?.(`[${d.id}] moveToHueAndSaturation request=${JSON.stringify(data.request)}`);
+          if (!Number.isFinite(hue) || !Number.isFinite(sat)) return;
+
+          lastRgb = hsvToRgbInt(hue, sat);
+          await merossSetRgbAndBrightness(d.ip, d.key, channel, lastRgb, lastLum);
+        })
+
+        // XY (optionnel)
+        .addCommandHandler('moveToColor', async (data) => {
+          this.log.info(`[${d.id}] moveToColor received: ${JSON.stringify(data.request)}`);
+        });
+
+      await this.registerDevice(light);
     }
-
-    const messageId = randomBytes(16).toString('hex'); // 32 hex
-    const timestamp = Math.floor(Date.now() / 1000);
-    const sign = this.md5(`${messageId}${this.merossKey}${timestamp}`);
-
-    const body = {
-      header: {
-        from: `http://${this.merossIp}/config`,
-        messageId,
-        method: 'SET',
-        namespace: 'Appliance.Control.ToggleX',
-        payloadVersion: 1,
-        timestamp,
-        sign,
-      },
-      payload: {
-        togglex: {
-          channel: this.channel,
-          onoff: on ? 1 : 0,
-        },
-      },
-    };
-
-    this.log.info(`Sending Meross ToggleX -> ${on ? 'ON' : 'OFF'} to ${this.merossIp}...`);
-
-    const res = await fetch(`http://${this.merossIp}/config`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    const text = await res.text().catch(() => '');
-    this.log.debug(`Meross HTTP status: ${res.status} ${res.statusText}`);
-    if (text) this.log.debug(`Meross response body: ${text}`);
   }
 }
