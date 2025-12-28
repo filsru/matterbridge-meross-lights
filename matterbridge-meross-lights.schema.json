@@ -1,0 +1,30 @@
+{
+  "title": "Matterbridge Meross Lights",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "title": "Name",
+      "description": "Nom displayed in Matter",
+      "default": "Meross Light"
+    },
+    "ip": {
+      "type": "string",
+      "title": "IP",
+      "description": "IP of device (ex: 192.168.1.109)"
+    },
+    "key": {
+      "type": "string",
+      "title": "Device key",
+      "description": "Meross Key"
+    },
+    "channel": {
+      "type": "integer",
+      "title": "Channel",
+      "description": "Channel Meross",
+      "default": 0,
+      "minimum": 0
+    }
+  },
+  "required": ["ip", "key"]
+}

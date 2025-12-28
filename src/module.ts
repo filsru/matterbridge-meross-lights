@@ -22,74 +22,93 @@
  * limitations under the License.
  */
 
-import { MatterbridgeDynamicPlatform, MatterbridgeEndpoint, onOffOutlet, PlatformConfig, PlatformMatterbridge } from 'matterbridge';
+import {
+  MatterbridgeDynamicPlatform,
+  MatterbridgeEndpoint,
+  onOffOutlet,
+  PlatformConfig,
+  PlatformMatterbridge,
+} from 'matterbridge';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
+import { createHash, randomBytes } from 'node:crypto';
 
-/**
- * This is the standard interface for Matterbridge plugins.
- * Each plugin should export a default function that follows this signature.
- *
- * @param {PlatformMatterbridge} matterbridge - An instance of MatterBridge.
- * @param {AnsiLogger} log - An instance of AnsiLogger. This is used for logging messages in a format that can be displayed with ANSI color codes and in the frontend.
- * @param {PlatformConfig} config - The platform configuration.
- * @returns {TemplatePlatform} - An instance of the MatterbridgeAccessory or MatterbridgeDynamicPlatform class. This is the main interface for interacting with the Matterbridge system.
- */
-export default function initializePlugin(matterbridge: PlatformMatterbridge, log: AnsiLogger, config: PlatformConfig): TemplatePlatform {
+type MerossPlatformConfig = PlatformConfig & {
+  ip?: string;
+  key?: string;
+  name?: string;
+  channel?: number;
+};
+
+export default function initializePlugin(
+  matterbridge: PlatformMatterbridge,
+  log: AnsiLogger,
+  config: PlatformConfig,
+): TemplatePlatform {
   return new TemplatePlatform(matterbridge, log, config);
 }
 
-// Here we define the TemplatePlatform class, which extends the MatterbridgeDynamicPlatform.
-// If you want to create an Accessory platform plugin, you should extend the MatterbridgeAccessoryPlatform class instead.
 export class TemplatePlatform extends MatterbridgeDynamicPlatform {
+  private merossIp?: string;
+  private merossKey?: string;
+  private deviceName = 'Meross Light';
+  private channel = 0;
+
   constructor(matterbridge: PlatformMatterbridge, log: AnsiLogger, config: PlatformConfig) {
-    // Always call super(matterbridge, log, config)
     super(matterbridge, log, config);
 
     // Verify that Matterbridge is the correct version
-    if (this.verifyMatterbridgeVersion === undefined || typeof this.verifyMatterbridgeVersion !== 'function' || !this.verifyMatterbridgeVersion('3.4.0')) {
+    if (
+      this.verifyMatterbridgeVersion === undefined ||
+      typeof this.verifyMatterbridgeVersion !== 'function' ||
+      !this.verifyMatterbridgeVersion('3.4.0')
+    ) {
       throw new Error(
         `This plugin requires Matterbridge version >= "3.4.0". Please update Matterbridge from ${this.matterbridge.matterbridgeVersion} to the latest version in the frontend."`,
       );
     }
 
+    const cfg = this.config as MerossPlatformConfig;
+    this.merossIp = cfg.ip;
+    this.merossKey = cfg.key;
+    this.deviceName = cfg.name ?? 'Meross Light';
+    this.channel = typeof cfg.channel === 'number' ? cfg.channel : 0;
+
     this.log.info(`Initializing Platform...`);
-    // You can initialize your platform here, like setting up initial state or loading configurations.
+    if (!this.merossIp || !this.merossKey) {
+      this.log.warn('Meross not configured yet: please set ip and key in the plugin settings.');
+    } else {
+      this.log.info(`Meross configured for IP ${this.merossIp} (key hidden), channel ${this.channel}.`);
+    }
   }
 
   override async onStart(reason?: string) {
     this.log.info(`onStart called with reason: ${reason ?? 'none'}`);
 
-    // Wait for the platform to fully load the select if you use them.
     await this.ready;
-
-    // Clean the selectDevice and selectEntity maps, if you want to reset the select. This is useful when you have an API that sends all the devices and you want to rediscover all of them.
     await this.clearSelect();
 
-    // Implements your own logic there
+    if (!this.merossIp || !this.merossKey) {
+      this.log.warn('Plugin not configured (ip/key missing). Skipping discovery.');
+      return;
+    }
+
     await this.discoverDevices();
   }
 
   override async onConfigure() {
-    // Always call super.onConfigure()
     await super.onConfigure();
-
     this.log.info('onConfigure called');
 
-    // Configure all your devices. The persisted attributes need to be updated.
     for (const device of this.getDevices()) {
       this.log.info(`Configuring device: ${device.uniqueId}`);
-      // You can update the device configuration here, for example:
-      // device.updateConfiguration({ key: 'value' });
     }
   }
 
   override async onChangeLoggerLevel(logLevel: LogLevel) {
     this.log.info(`onChangeLoggerLevel called with: ${logLevel}`);
-    // Change here the logger level of the api you use or of your devices
   }
 
   override async onShutdown(reason?: string) {
-    // Always call super.onShutdown(reason)
     await super.onShutdown(reason);
 
     this.log.info(`onShutdown called with reason: ${reason ?? 'none'}`);
@@ -98,24 +117,75 @@ export class TemplatePlatform extends MatterbridgeDynamicPlatform {
 
   private async discoverDevices() {
     this.log.info('Discovering devices...');
-    // Implement device discovery logic here.
-    // For example, you might fetch devices from an API.
-    // and register them with the Matterbridge instance.
 
-    // Example: Create and register an outlet device
-    // If you want to create an Accessory platform plugin and your platform extends MatterbridgeAccessoryPlatform,
-    // instead of createDefaultBridgedDeviceBasicInformationClusterServer, call createDefaultBasicInformationClusterServer().
-    const outlet = new MatterbridgeEndpoint(onOffOutlet, { id: 'outlet1' })
-      .createDefaultBridgedDeviceBasicInformationClusterServer('Outlet', 'SN123456', this.matterbridge.aggregatorVendorId, 'Matterbridge', 'Matterbridge Outlet', 10000, '1.0.0')
+    // Minimal: expose an outlet to test on/off commands.
+    // Next: swap onOffOutlet -> onOffLight + level/color clusters.
+    const outlet = new MatterbridgeEndpoint(onOffOutlet, { id: 'meross1' })
+      .createDefaultBridgedDeviceBasicInformationClusterServer(
+        this.deviceName,
+        'MEROSS-SN-LOCAL',
+        this.matterbridge.aggregatorVendorId,
+        'Matterbridge',
+        'Meross via Matterbridge',
+        10000,
+        '1.0.0',
+      )
       .createDefaultPowerSourceWiredClusterServer()
       .addRequiredClusterServers()
-      .addCommandHandler('on', (data) => {
+      .addCommandHandler('on', async (data) => {
         this.log.info(`Command on called on cluster ${data.cluster}`);
+        await this.merossToggle(true);
       })
-      .addCommandHandler('off', (data) => {
+      .addCommandHandler('off', async (data) => {
         this.log.info(`Command off called on cluster ${data.cluster}`);
+        await this.merossToggle(false);
       });
 
     await this.registerDevice(outlet);
+  }
+
+  private md5(input: string): string {
+    return createHash('md5').update(input, 'utf8').digest('hex');
+  }
+
+  private async merossToggle(on: boolean) {
+    if (!this.merossIp || !this.merossKey) {
+      this.log.warn('merossToggle called but ip/key are missing.');
+      return;
+    }
+
+    const messageId = randomBytes(16).toString('hex'); // 32 hex
+    const timestamp = Math.floor(Date.now() / 1000);
+    const sign = this.md5(`${messageId}${this.merossKey}${timestamp}`);
+
+    const body = {
+      header: {
+        from: `http://${this.merossIp}/config`,
+        messageId,
+        method: 'SET',
+        namespace: 'Appliance.Control.ToggleX',
+        payloadVersion: 1,
+        timestamp,
+        sign,
+      },
+      payload: {
+        togglex: {
+          channel: this.channel,
+          onoff: on ? 1 : 0,
+        },
+      },
+    };
+
+    this.log.info(`Sending Meross ToggleX -> ${on ? 'ON' : 'OFF'} to ${this.merossIp}...`);
+
+    const res = await fetch(`http://${this.merossIp}/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    const text = await res.text().catch(() => '');
+    this.log.debug(`Meross HTTP status: ${res.status} ${res.statusText}`);
+    if (text) this.log.debug(`Meross response body: ${text}`);
   }
 }
